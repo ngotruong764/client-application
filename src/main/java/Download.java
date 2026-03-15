@@ -10,20 +10,23 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Logger;
 
 public class Download {
-
+    private static final Logger logger = Logger.getLogger(Download.class.getName());
     private static final String RMI_HOST = "localhost";
     private static final int RMI_PORT = 1099;
-    private static final String DOWNLOAD_DIR = "downloads";
+    private static final String DOWNLOAD_DIR = "src/main/resources/static";
 
     private static final AtomicLong downloadedBytes = new AtomicLong(0);
     private static long totalFileSize;
 
     public static void main(String[] args) {
+        System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tF %1$tT [%4$s] %5$s %n");
 
+        // If the user does not provide a file name -> return
         if (args.length == 0) {
-            System.out.println("Usage: java Download <filename>");
+            logger.info("You need provide a file name: java Download <filename>");
             return;
         }
 
@@ -39,6 +42,7 @@ public class Download {
 
             List<FileOwner> fileOwners = directory.getAllAvailableFiles();
 
+            // Find the target file and its owner
             FileOwner target = null;
             for (FileOwner f : fileOwners) {
                 if (f.getFileInfo().getFileName().equals(fileName)) {
@@ -48,7 +52,7 @@ public class Download {
             }
 
             if (target == null) {
-                System.out.println("File not found");
+                logger.info("No file found at " + fileName);
                 return;
             }
 
