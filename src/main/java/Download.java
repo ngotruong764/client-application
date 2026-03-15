@@ -128,33 +128,54 @@ public class Download {
                                      long end,
                                      int part) {
 
-        try (Socket socket = new Socket(owner.getSocketAddr(), owner.getSocketPort())) {
+        long currentPos = start;
 
-            DataOutputStream request = new DataOutputStream(socket.getOutputStream());
+        while (currentPos <= end) {
 
-            request.writeUTF(fileName);
-            request.writeLong(start);
-            request.writeLong(end);
-            request.flush();
+            try (Socket socket =
+                         new Socket(owner.getSocketAddr(), owner.getSocketPort())) {
 
-            GZIPInputStream in = new GZIPInputStream(socket.getInputStream());
+                DataOutputStream request =
+                        new DataOutputStream(socket.getOutputStream());
 
-            FileOutputStream fos =
-                    new FileOutputStream(DOWNLOAD_DIR + "/" + fileName + ".part" + part);
+                request.writeUTF(fileName);
+                request.writeLong(currentPos);
+                request.writeLong(end);
+                request.flush();
 
-            byte[] buffer = new byte[4096];
-            int read;
+                GZIPInputStream in =
+                        new GZIPInputStream(socket.getInputStream());
 
-            while ((read = in.read(buffer)) != -1) {
+                RandomAccessFile fos =
+                        new RandomAccessFile(
+                                DOWNLOAD_DIR + "/" + fileName + ".part" + part, "rw");
 
-                fos.write(buffer, 0, read);
-                partProgress[part] += read;
+                fos.seek(currentPos - start);
+
+                byte[] buffer = new byte[4096];
+                int read;
+
+                while ((read = in.read(buffer)) != -1) {
+
+                    fos.write(buffer, 0, read);
+
+                    partProgress[part] += read;
+                    currentPos += read;
+                }
+
+                fos.close();
+
+            } catch (Exception e) {
+
+                logger.warning("Source failed. Switching source...");
+
+                try {
+                    owner = getAnotherOwner(fileName, owner);
+                } catch (Exception ex) {
+                    logger.severe("No available client for retry");
+                    break;
+                }
             }
-
-            fos.close();
-
-        } catch (Exception e) {
-            e.printStackTrace();
         }
     }
 
@@ -253,5 +274,32 @@ public class Download {
         }
 
         output.close();
+    }
+
+    /**
+     * Method to Choose Another Client
+     */
+    private static ClientInfo getAnotherOwner(String fileName,
+                                              ClientInfo failedOwner)
+            throws Exception {
+
+        Registry registry = LocateRegistry.getRegistry(RMI_HOST, RMI_PORT);
+        IDirectoryService directory =
+                (IDirectoryService) registry.lookup("IDirectoryService");
+
+        List<FileOwner> files = directory.getAllAvailableFiles();
+
+        for (FileOwner f : files) {
+            if (f.getFileInfo().getFileName().equals(fileName)) {
+
+                for (ClientInfo c : f.getClientInfos()) {
+
+                    if (!c.getId().equals(failedOwner.getId()))
+                        return c;
+                }
+            }
+        }
+
+        throw new Exception("No alternative source");
     }
 }
