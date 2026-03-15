@@ -5,7 +5,7 @@ import service.FileService;
 import service.IDirectoryService;
 import service.SocketService;
 
-import java.io.InputStream;
+import java.io.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -31,7 +31,7 @@ public class ClientApplicationMain {
     private static final String RMI_HOST = "RMI_HOST";
     private static final String RMI_PORT = "RMI_PORT";
     private static final String CLIENT_ID = "CLIENT_ID";
-    private static final String FILES_DIRECTORY_PATH = "src/main/resources/static";
+    private static final String FILES_DIRECTORY_PATH = "files";
 
     // Services
     private static final FileService fileService = new FileService();
@@ -111,13 +111,68 @@ public class ClientApplicationMain {
 
             // Connect
             while (true) {
-                // Creating a socket and waiting for client connection
+
                 Socket socket = serverSocket.accept();
-                InetSocketAddress remoteAddress = (InetSocketAddress) socket.getRemoteSocketAddress();
-                logger.info("Connected client IP: " + remoteAddress.getAddress().getHostAddress());
-                logger.info("Connected client port: " + remoteAddress.getPort());
-                // Read from socket
-                InputStream os = socket.getInputStream();
+
+                new Thread(() -> {
+                    try {
+
+                        InetSocketAddress remote =
+                                (InetSocketAddress) socket.getRemoteSocketAddress();
+
+                        logger.info("Client IP: " + remote.getAddress().getHostAddress());
+                        logger.info("Client port: " + remote.getPort());
+
+                        DataInputStream in =
+                                new DataInputStream(socket.getInputStream());
+
+                        DataOutputStream out =
+                                new DataOutputStream(socket.getOutputStream());
+
+                        // read request
+                        String fileName = in.readUTF();
+                        long start = in.readLong();
+                        long end = in.readLong();
+
+                        logger.info("Download request: " + fileName +
+                                " [" + start + " - " + end + "]");
+
+                        File file = new File("files/" + fileName);
+
+                        if (!file.exists()) {
+                            logger.warning("File not found");
+                            socket.close();
+                            return;
+                        }
+
+                        RandomAccessFile raf = new RandomAccessFile(file, "r");
+
+                        raf.seek(start);
+
+                        byte[] buffer = new byte[4096];
+                        long remaining = end - start + 1;
+
+                        while (remaining > 0) {
+
+                            int read = raf.read(buffer, 0,
+                                    (int) Math.min(buffer.length, remaining));
+
+                            if (read == -1) break;
+
+                            out.write(buffer, 0, read);
+                            remaining -= read;
+                        }
+
+                        out.flush();
+                        raf.close();
+                        socket.close();
+
+                        logger.info("Chunk sent");
+
+                    } catch (Exception e) {
+                        logger.severe(e.getMessage());
+                    }
+                }).start();
             }
 
         } catch (Exception e) {
