@@ -7,9 +7,8 @@ import java.net.Socket;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.*;
+import java.util.zip.GZIPInputStream;
 import java.util.logging.Logger;
 
 public class Download {
@@ -18,8 +17,12 @@ public class Download {
     private static final int RMI_PORT = 1099;
     private static final String DOWNLOAD_DIR = "src/main/resources/static";
 
-    private static final AtomicLong downloadedBytes = new AtomicLong(0);
-    private static long totalFileSize;
+    private static long[] partProgress;
+    private static long[] partSizeArr;
+    private static long[] partStartTime;
+
+    private static volatile boolean downloading = true;
+    private static long totalStartTime;
 
     public static void main(String[] args) {
         System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tF %1$tT [%4$s] %5$s %n");
@@ -56,11 +59,18 @@ public class Download {
                 return;
             }
 
-            totalFileSize = target.getFileInfo().getFileSize();
+            long totalFileSize = target.getFileInfo().getFileSize();
             List<ClientInfo> owners = target.getClientInfos();
 
             int parts = owners.size();
+
+            partProgress = new long[parts];
+            partSizeArr = new long[parts];
+            partStartTime = new long[parts];
+
             long chunkSize = totalFileSize / parts;
+
+            totalStartTime = System.currentTimeMillis();
 
             ExecutorService executor = Executors.newFixedThreadPool(parts);
 
@@ -71,18 +81,41 @@ public class Download {
                 long start = i * chunkSize;
                 long end = (i == parts - 1) ? totalFileSize - 1 : start + chunkSize - 1;
 
+                partSizeArr[i] = end - start + 1;
+
+                partStartTime[i] = System.currentTimeMillis();
+
                 int partNumber = i;
 
                 executor.submit(() ->
                         downloadPart(owner, fileName, start, end, partNumber));
             }
 
+            // UI Thread
+            Thread ui = new Thread(() -> {
+                while (downloading) {
+                    printProgress();
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException ignored) {}
+                }
+                printProgress();
+            });
+
+            ui.start();
+
             executor.shutdown();
-            while (!executor.isTerminated()) Thread.sleep(500);
+            executor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
+
+            downloading = false;
+            ui.join();
 
             mergeParts(fileName, parts);
 
+            long totalTime = (System.currentTimeMillis() - totalStartTime) / 1000;
+
             System.out.println("\nDownload completed");
+            System.out.println("Total download time: " + formatTime(totalTime));
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -97,16 +130,17 @@ public class Download {
 
         try (Socket socket = new Socket(owner.getSocketAddr(), owner.getSocketPort())) {
 
-            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-            out.writeUTF(fileName);
-            out.writeLong(start);
-            out.writeLong(end);
-            out.flush();
+            DataOutputStream request = new DataOutputStream(socket.getOutputStream());
 
-            DataInputStream in = new DataInputStream(socket.getInputStream());
+            request.writeUTF(fileName);
+            request.writeLong(start);
+            request.writeLong(end);
+            request.flush();
 
-            FileOutputStream fos = new FileOutputStream(
-                    DOWNLOAD_DIR + "/" + fileName + ".part" + part);
+            GZIPInputStream in = new GZIPInputStream(socket.getInputStream());
+
+            FileOutputStream fos =
+                    new FileOutputStream(DOWNLOAD_DIR + "/" + fileName + ".part" + part);
 
             byte[] buffer = new byte[4096];
             int read;
@@ -114,42 +148,110 @@ public class Download {
             while ((read = in.read(buffer)) != -1) {
 
                 fos.write(buffer, 0, read);
-
-                long current = downloadedBytes.addAndGet(read);
-                int percent = (int)((current * 100) / totalFileSize);
-
-                System.out.print("\rDownloading: " + percent + "%");
+                partProgress[part] += read;
             }
 
             fos.close();
-            System.out.println("\nPart " + part + " done");
 
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
+    private static void printProgress() {
+
+        int parts = partProgress.length;
+
+        System.out.print("\033[H\033[2J");
+        System.out.flush();
+
+        for (int i = 0; i < parts; i++) {
+
+            int barWidth = 20;
+
+            double progress = (double) partProgress[i] / partSizeArr[i];
+            int pos = (int) (barWidth * progress);
+
+            long time = System.currentTimeMillis() - partStartTime[i];
+
+            double speed = (time > 0)
+                    ? (partProgress[i] / 1024.0 / 1024.0) / (time / 1000.0)
+                    : 0;
+
+            StringBuilder bar = new StringBuilder();
+
+            bar.append("Part ").append(i).append(" [");
+
+            for (int j = 0; j < barWidth; j++) {
+                if (j < pos) bar.append("#");
+                else bar.append("-");
+            }
+
+            int percent = (int) (progress * 100);
+
+            bar.append("] ")
+                    .append(percent)
+                    .append("%  ")
+                    .append(formatSize(partProgress[i]))
+                    .append(" / ")
+                    .append(formatSize(partSizeArr[i]))
+                    .append("  ")
+                    .append(String.format("%.2f MB/s", speed))
+                    .append("  Time: ")
+                    .append(formatTime(time / 1000));
+
+            System.out.println(bar);
+        }
+
+        long totalTime = (System.currentTimeMillis() - totalStartTime) / 1000;
+        System.out.println("\nTotal running time: " + formatTime(totalTime));
+    }
+
+    private static String formatSize(long bytes) {
+
+        double kb = bytes / 1024.0;
+        double mb = kb / 1024.0;
+
+        if (mb >= 1) return String.format("%.2f MB", mb);
+        if (kb >= 1) return String.format("%.2f KB", kb);
+
+        return bytes + " B";
+    }
+
+    private static String formatTime(long seconds) {
+
+        long h = seconds / 3600;
+        long m = (seconds % 3600) / 60;
+        long s = seconds % 60;
+
+        if (h > 0)
+            return String.format("%02d:%02d:%02d", h, m, s);
+
+        return String.format("%02d:%02d", m, s);
+    }
+
     private static void mergeParts(String fileName, int parts) throws IOException {
 
-        FileOutputStream fos =
+        FileOutputStream output =
                 new FileOutputStream(DOWNLOAD_DIR + "/download_" + fileName);
 
         for (int i = 0; i < parts; i++) {
 
-            FileInputStream fis =
+            FileInputStream input =
                     new FileInputStream(DOWNLOAD_DIR + "/" + fileName + ".part" + i);
 
             byte[] buffer = new byte[4096];
             int read;
 
-            while ((read = fis.read(buffer)) != -1) {
-                fos.write(buffer, 0, read);
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
             }
 
-            fis.close();
+            input.close();
+
             new File(DOWNLOAD_DIR + "/" + fileName + ".part" + i).delete();
         }
 
-        fos.close();
+        output.close();
     }
 }

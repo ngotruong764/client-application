@@ -14,19 +14,25 @@ import java.rmi.registry.Registry;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import java.util.zip.GZIPOutputStream;
 
 public class ClientApplicationMain {
+
     private static final Logger logger = Logger.getLogger(ClientApplicationMain.class.getName());
+
+    private static final ThreadPoolExecutor executor =
+            (ThreadPoolExecutor) Executors.newFixedThreadPool(10);
 
     private static final String RMI_HOST = "RMI_HOST";
     private static final String RMI_PORT = "RMI_PORT";
     private static final String CLIENT_ID = "CLIENT_ID";
     private static final String FILES_DIRECTORY_PATH = "src/main/resources/static/";
 
-    // Services
     private static final FileService fileService = new FileService();
 
     public static void main(String[] args) {
@@ -99,11 +105,16 @@ public class ClientApplicationMain {
 
             }
 
+
             // Connect
             while (true) {
+
                 Socket socket = serverSocket.accept();
-                new Thread(() -> {
+
+                executor.execute(() -> {
+
                     try {
+
                         InetSocketAddress remote =
                                 (InetSocketAddress) socket.getRemoteSocketAddress();
 
@@ -112,16 +123,13 @@ public class ClientApplicationMain {
 
                         DataInputStream in =
                                 new DataInputStream(socket.getInputStream());
-                        DataOutputStream out =
-                                new DataOutputStream(socket.getOutputStream());
 
-                        // read request
                         String fileName = in.readUTF();
                         long start = in.readLong();
                         long end = in.readLong();
 
-                        logger.info("Download request: " + fileName +
-                                " [" + start + " - " + end + "]");
+                        logger.info("Download request: " +
+                                fileName + " [" + start + " - " + end + "]");
 
                         File file = new File(FILES_DIRECTORY_PATH + fileName);
 
@@ -131,41 +139,50 @@ public class ClientApplicationMain {
                             return;
                         }
 
-                        RandomAccessFile raf = new RandomAccessFile(file, "r");
+                        RandomAccessFile raf =
+                                new RandomAccessFile(file, "r");
 
                         raf.seek(start);
+
+                        GZIPOutputStream gzipOut =
+                                new GZIPOutputStream(socket.getOutputStream());
 
                         byte[] buffer = new byte[4096];
                         long remaining = end - start + 1;
 
                         while (remaining > 0) {
 
-                            int read = raf.read(buffer, 0,
-                                    (int) Math.min(buffer.length, remaining));
+                            int read = raf.read(
+                                    buffer,
+                                    0,
+                                    (int) Math.min(buffer.length, remaining)
+                            );
 
                             if (read == -1) break;
 
-                            out.write(buffer, 0, read);
+                            gzipOut.write(buffer, 0, read);
+
                             remaining -= read;
                         }
 
-                        out.flush();
+                        gzipOut.finish();
+                        gzipOut.flush();
+
                         raf.close();
                         socket.close();
 
-                        logger.info("Chunk sent");
+                        logger.info("Compressed chunk sent");
 
                     } catch (Exception e) {
-                        logger.severe(e.getMessage());
+                        logger.log(Level.SEVERE, e.getMessage());
                     }
-                }).start();
+
+                });
             }
 
         } catch (Exception e) {
+
             logger.log(Level.FINER, e.toString());
         }
-
     }
-
-
 }
